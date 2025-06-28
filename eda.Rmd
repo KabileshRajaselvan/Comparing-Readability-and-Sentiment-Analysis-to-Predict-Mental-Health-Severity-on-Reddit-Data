@@ -1,0 +1,625 @@
+---
+title: "eda"
+author: "Kabilesh Rajaselvan"
+date: "April 12, 2025"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(data.table)
+library(ggplot2)
+
+```
+
+```{r}
+dataset <- fread("C:/Users/New/Downloads/eda_data/mental_disorders_reddit.csv")
+
+# Randomly sample 50,000 rows
+set.seed(123)  # Ensures reproducibility
+dataset <- dataset[sample(.N, 700000)]
+
+
+```
+
+```{r}
+str(dataset)
+summary(dataset)
+```
+
+```{r}
+colSums(is.na(dataset))
+```
+
+```{r}
+dataset$created_utc <- as.POSIXct(as.numeric(dataset$created_utc), origin = "1970-01-01", tz = "UTC")
+dataset$over_18 <- dataset$over_18 == "True"
+dataset <- dataset[!selftext %in% c("[deleted]", "[removed]", ""), ]
+dataset[, full_text := paste(title, selftext, sep = " ")]
+setnames(dataset, "subreddit", "mental_condition")
+
+```
+
+```{r}
+unique(dataset$mental_condition)
+dataset[, c("selftext", "title") := NULL]
+```
+
+```{r}
+# Normalize mental condition values to lowercase for consistency
+dataset$mental_condition <- tolower(dataset$mental_condition)
+
+# Replace all "bpd" values with "bipolar"
+dataset$mental_condition[dataset$mental_condition == "bpd"] <- "bipolar"
+
+summary(dataset)
+```
+
+```{r}
+
+# Count posts by mental_condition and over_18
+condition_age_counts <- dataset[, .N, by = .(mental_condition, over_18)][order(-N)]
+
+# Plot grouped bar chart with count labels
+ggplot(condition_age_counts, aes(x = reorder(mental_condition, -N), y = N, fill = over_18)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = N), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.3, size = 3.5) +
+  theme_minimal() +
+  labs(title = "Count of Posts per Mental Condition by Age Group",
+       x = "Mental Condition",
+       y = "Number of Posts",
+       fill = "Over 18") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+# Convert UNIX timestamp to POSIXct and then extract year
+dataset$year <- format(as.POSIXct(as.numeric(dataset$created_utc), origin = "1970-01-01", tz = "UTC"), "%Y")
+
+# Ensure dataset is a data.table
+setDT(dataset)
+
+# Count posts grouped by year and mental_condition
+year_condition_counts <- dataset[, .N, by = .(year, mental_condition)][order(year)]
+
+ggplot(year_condition_counts, aes(x = year, y = N, fill = mental_condition)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = N), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.3, size = 3) +
+  theme_minimal() +
+  labs(title = "Posts per Mental Condition by Year",
+       x = "Year",
+       y = "Number of Posts",
+       fill = "Mental Condition") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+```{r}
+# Load required packages
+library(syuzhet)
+library(quanteda)
+library(koRpus)
+library(koRpus.lang.en)
+library(ggplot2)
+library(dplyr)
+
+# Sample dataset
+texts <- dataset$full_text
+```
+
+
+```{r}
+# --- 1. Sentiment Scores --- #
+# Get sentiment using syuzhet (TextBlob, AFINN, NRC)
+textblob_scores <- get_sentiment(texts, method = "syuzhet")
+afinn_scores <- get_sentiment(texts, method = "afinn")
+nrc_scores <- get_sentiment(texts, method = "nrc")
+
+```
+
+
+
+```{r}
+library(quanteda)
+library(quanteda.textstats)
+```
+
+
+```{r}
+# --- 1. Readability Scores --- #
+
+
+# Create a corpus from your text column
+corpus_data <- corpus(dataset$full_text)
+
+# Compute readability scores
+read_scores <- textstat_readability(corpus_data,
+                                    measure = c("Flesch", "FOG", "SMOG"))
+
+```
+
+
+```{r}
+severity_map <- list(
+  anxiety = "Less",
+  depression = "Severe",
+  bipolar = "Severe",
+  mentalillness = "Moderate",
+  schizophrenia = "Severe"
+)
+
+
+```
+
+
+```{r}
+# Map the severity to each row in the dataset
+dataset$severity_level <- sapply(dataset$mental_condition, function(cond) severity_map[[cond]])
+
+```
+
+```{r}
+# --- 3. Combine All Scores --- #
+combined <- data.frame(
+  text = texts,
+  sentiment_textblob = textblob_scores,
+  sentiment_afinn = afinn_scores,
+  sentiment_nrc = nrc_scores,
+  fkgl = read_scores$Flesch,
+  fog = read_scores$FOG,
+  smog = read_scores$SMOG
+)
+```
+
+
+
+```{r}
+# ---- Severity Classification Functions ----
+
+# For sentiment scores (lower = more negative = more severe)
+classify_sentiment_severity <- function(sentiment) {
+  if (is.na(sentiment)) return(NA)
+  if (sentiment < -0.5) return("Severe")
+  else if (sentiment >= -0.5 & sentiment < 0.2) return("Moderate")
+  else return("Less")
+}
+
+# For readability scores (higher = more complex = more severe)
+classify_readability_severity <- function(score) {
+  if (is.na(score)) return(NA)
+  if (score > 10) return("Severe")
+  else if (score >= 9) return("Moderate")
+  else return("Less")
+}
+
+# ---- Apply Severity Classification ----
+
+# Sentiment-based
+combined$severity_textblob <- sapply(combined$sentiment_textblob, classify_sentiment_severity)
+combined$severity_afinn <- sapply(combined$sentiment_afinn, classify_sentiment_severity)
+combined$severity_nrc <- sapply(combined$sentiment_nrc, classify_sentiment_severity)
+
+# Readability-based
+combined$severity_fkgl <- sapply(combined$fkgl, classify_readability_severity)
+combined$severity_fog <- sapply(combined$fog, classify_readability_severity)
+combined$severity_smog <- sapply(combined$smog, classify_readability_severity)
+
+# ---- Combine to One Severity Per Group ----
+
+get_mode <- function(x) {
+  ux <- na.omit(unique(x))
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# Final sentiment severity
+combined$final_sentiment_severity <- apply(
+  combined[, c("severity_textblob", "severity_afinn", "severity_nrc")],
+  1,
+  get_mode
+)
+
+# Final readability severity
+combined$final_readability_severity <- apply(
+  combined[, c("severity_fkgl", "severity_fog", "severity_smog")],
+  1,
+  get_mode
+)
+
+
+
+library(reshape2)
+
+# Count for both sentiment and readability based severity
+severity_counts <- data.frame(
+  Type = rep(c("Sentiment-Based", "Readability-Based"), each = 3),
+  Severity = rep(c("Severe", "Moderate", "Less"), 2),
+  Count = c(
+    table(combined$final_sentiment_severity)[c("Severe", "Moderate", "Less")],
+    table(combined$final_readability_severity)[c("Severe", "Moderate", "Less")]
+  )
+)
+
+# Replace NA with 0 in case any severity levels are missing
+severity_counts$Count[is.na(severity_counts$Count)] <- 0
+
+
+
+```
+
+
+
+```{r}
+# Ensure the levels are consistent and case is standardized
+dataset$severity_level <- tolower(dataset$severity_level)
+
+# Create a frequency table for original data
+original_table <- table(factor(dataset$severity_level, levels = c("severe", "moderate", "less")))
+
+# Create a DataFrame to match the format of `severity_counts`
+original_df <- data.frame(
+  Type = "Ground Truth",
+  Severity = c("Severe", "Moderate", "Less"),
+  Count = as.numeric(original_table)
+)
+
+# Combine with existing severity_counts
+full_severity_counts <- rbind(severity_counts, original_df)
+
+
+
+
+ggplot(full_severity_counts, aes(x = Severity, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = Count), 
+            vjust = -0.5, 
+            position = position_dodge(0.9), 
+            size = 3.5) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Comparison of Severity Levels",
+       x = "Severity Level", y = "Post Count") +
+  scale_fill_manual(values = c("Sentiment-Based" = "#1f77b4", 
+                               "Readability-Based" = "#ff7f0e", 
+                               "Ground Truth" = "#2ca02c"))
+```
+
+
+```{r}
+combined$hybrid_severity <- ifelse(
+  combined$final_sentiment_severity == "Severe" | combined$final_readability_severity == "Severe",
+  "Severe",
+  ifelse(
+    combined$final_sentiment_severity == "Moderate" | combined$final_readability_severity == "Moderate",
+    "Moderate",
+    "Less"
+  )
+)
+
+```
+
+
+
+
+
+```{r}
+library(caret)
+
+# 1. Drop any rows with NA in severity columns (if any)
+valid_rows <- complete.cases(dataset$severity_level, 
+                              combined$final_sentiment_severity, 
+                              combined$final_readability_severity, 
+                              combined$hybrid_severity)
+
+# Apply the filtering
+actual_severity <- dataset$severity_level[valid_rows]
+pred_sentiment <- combined$final_sentiment_severity[valid_rows]
+pred_readability <- combined$final_readability_severity[valid_rows]
+pred_hybrid <- combined$hybrid_severity[valid_rows]
+
+# 2. Standardize case (to avoid 'severe' vs 'Severe' mismatches)
+actual_severity <- factor(tolower(actual_severity))
+pred_sentiment <- factor(tolower(pred_sentiment), levels = levels(actual_severity))
+pred_readability <- factor(tolower(pred_readability), levels = levels(actual_severity))
+pred_hybrid <- factor(tolower(pred_hybrid), levels = levels(actual_severity))
+
+# 3. Run confusion matrices
+conf_matrix_sentiment <- confusionMatrix(pred_sentiment, actual_severity)
+conf_matrix_readability <- confusionMatrix(pred_readability, actual_severity)
+conf_matrix_hybrid <- confusionMatrix(pred_hybrid, actual_severity)
+
+# 4. Print results
+cat("📊 Sentiment-Based Severity Classification:\n")
+print(conf_matrix_sentiment)
+
+cat("\n📊 Readability-Based Severity Classification:\n")
+print(conf_matrix_readability)
+
+cat("\n📊 Hybrid-Based Severity Classification:\n")
+print(conf_matrix_hybrid)
+
+```
+
+
+
+
+
+
+
+```{r}
+# Extract accuracy from each confusion matrix
+accuracy_sentiment <- conf_matrix_sentiment$overall['Accuracy']
+accuracy_readability <- conf_matrix_readability$overall['Accuracy']
+accuracy_hybrid <- conf_matrix_hybrid$overall['Accuracy']
+
+# Create a data frame to compare the accuracy of each method
+accuracy_df <- data.frame(
+  Method = c("Sentiment-Based", "Readability-Based", "Hybrid-Based"),
+  Accuracy = c(accuracy_sentiment, accuracy_readability, accuracy_hybrid)
+)
+
+# Print the accuracy comparison
+print(accuracy_df)
+
+
+# Plot the comparison of accuracy across the three methods
+library(ggplot2)
+
+ggplot(accuracy_df, aes(x = Method, y = Accuracy, fill = Method)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = round(Accuracy, 3)), vjust = -0.5, size = 5) +
+  labs(title = "Comparison of Classification Accuracy",
+       y = "Accuracy", x = "") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+
+
+```
+
+
+```{r}
+library(dplyr)
+
+# Combine the dataset and the computed features
+model_data <- cbind(dataset, combined)
+
+# Keep only rows with complete data
+model_data <- model_data %>%
+  mutate(severity_level = tolower(severity_map[mental_condition])) %>%
+  filter(complete.cases(severity_level, sentiment_textblob, sentiment_afinn, sentiment_nrc, fkgl, fog, smog)) %>%
+  mutate(severity_level = factor(severity_level, levels = c("less", "moderate", "severe")))
+
+```
+
+
+```{r}
+# Select features and target
+features <- model_data %>%
+  select(sentiment_textblob, sentiment_afinn, sentiment_nrc, fkgl, fog, smog)
+
+labels <- model_data$severity_level
+
+```
+
+
+```{r}
+library(caret)
+
+set.seed(123)
+train_index <- createDataPartition(labels, p = 0.8, list = FALSE)
+train_features <- features[train_index, ]
+test_features <- features[-train_index, ]
+train_labels <- labels[train_index]
+test_labels <- labels[-train_index]
+
+```
+
+```{r}
+install.packages("randomForest")
+```
+
+
+```{r}
+library(randomForest)
+
+set.seed(123)
+rf_model <- randomForest(x = train_features, y = train_labels, importance = TRUE)
+
+# Prediction
+predictions <- predict(rf_model, test_features)
+
+# Evaluation
+conf_matrix <- confusionMatrix(predictions, test_labels)
+print(conf_matrix)
+
+```
+
+
+```{r}
+varImpPlot(rf_model, main = "Feature Importance - Random Forest")
+
+```
+
+
+```{r}
+library(xgboost)
+library(caret)  # For confusionMatrix
+
+# Convert to matrix
+train_matrix <- as.matrix(train_features)
+test_matrix <- as.matrix(test_features)
+
+# Train the model
+xgb_model <- xgboost(data = train_matrix,
+                     label = as.numeric(train_labels) - 1,
+                     objective = "multi:softmax",
+                     num_class = 3,
+                     nrounds = 100,
+                     verbose = 0)
+
+# Make predictions
+xgb_preds_numeric <- predict(xgb_model, newdata = test_matrix)
+
+# Get the original levels in correct order
+severity_levels <- levels(train_labels)  # e.g., c("less", "moderate", "severe")
+
+# Convert numeric predictions (0,1,2) back to factor labels
+xgb_preds <- factor(xgb_preds_numeric, levels = 0:2, labels = severity_levels)
+
+# Run confusion matrix
+confusionMatrix(xgb_preds, test_labels)
+
+
+
+```
+
+
+```{r}
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(dplyr)
+
+```
+
+
+```{r}
+get_class_metrics <- function(conf_matrix) {
+  cm_table <- conf_matrix$byClass[, c("Precision", "Recall", "F1")]
+  cm_table <- as.data.frame(cm_table)
+  cm_table$Class <- rownames(cm_table)
+  return(cm_table)
+}
+
+```
+
+
+```{r}
+plot_metrics_bar <- function(metrics_df, title) {
+  melted_df <- melt(metrics_df, id.vars = "Class")
+  ggplot(melted_df, aes(x = Class, y = value, fill = variable)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = title, y = "Score", fill = "Metric") +
+    theme_minimal()
+}
+
+```
+
+
+```{r}
+plot_conf_matrix <- function(conf_matrix, title) {
+  cm <- as.data.frame(conf_matrix$table)
+  ggplot(cm, aes(x = Prediction, y = Reference, fill = Freq)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Freq), vjust = 1) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(title = title, x = "Predicted", y = "Actual") +
+    theme_minimal()
+}
+
+```
+
+
+
+```{r}
+metrics_sentiment <- get_class_metrics(conf_matrix_sentiment)
+plot_metrics_bar(metrics_sentiment, "Sentiment Model - Precision, Recall, F1")
+plot_conf_matrix(conf_matrix_sentiment, "Sentiment Model - Confusion Matrix")
+
+```
+
+
+```{r}
+metrics_readability <- get_class_metrics(conf_matrix_readability)
+plot_metrics_bar(metrics_readability, "Readability Model - Precision, Recall, F1")
+plot_conf_matrix(conf_matrix_readability, "Readability Model - Confusion Matrix")
+
+```
+
+
+```{r}
+metrics_hybrid <- get_class_metrics(conf_matrix_hybrid)
+plot_metrics_bar(metrics_hybrid, "Hybrid Model - Precision, Recall, F1")
+plot_conf_matrix(conf_matrix_hybrid, "Hybrid Model - Confusion Matrix")
+
+```
+
+
+```{r}
+# After getting confusion matrix:
+conf_matrix_xgb <- confusionMatrix(xgb_preds, test_labels)
+metrics_xgb <- get_class_metrics(conf_matrix_xgb)
+
+plot_metrics_bar(metrics_xgb, "XGBoost Model - Precision, Recall, F1")
+plot_conf_matrix(conf_matrix_xgb, "XGBoost Model - Confusion Matrix")
+
+```
+
+
+```{r}
+get_class_metrics_named <- function(conf_matrix, model_name) {
+  df <- as.data.frame(conf_matrix$byClass[, c("Precision", "Recall", "F1")])
+  df$Class <- rownames(df)
+  df$Model <- model_name
+  return(df)
+}
+
+df_sentiment <- get_class_metrics_named(conf_matrix_sentiment, "Sentiment")
+df_readability <- get_class_metrics_named(conf_matrix_readability, "Readability")
+df_hybrid <- get_class_metrics_named(conf_matrix_hybrid, "Hybrid")
+conf_matrix_xgb <- confusionMatrix(xgb_preds, test_labels)
+df_xgb <- get_class_metrics_named(conf_matrix_xgb, "XGBoost")
+
+all_metrics <- rbind(df_sentiment, df_readability, df_hybrid, df_xgb)
+melted_metrics <- melt(all_metrics, id.vars = c("Class", "Model"))
+
+ggplot(melted_metrics, aes(x = Class, y = value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ variable, ncol = 1) +
+  labs(title = "Model Comparison: Precision, Recall, F1 by Class",
+       y = "Score", x = "Severity Class") +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 12, face = "bold"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
